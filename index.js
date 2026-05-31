@@ -54,11 +54,11 @@ https://bloggers.carely.group/register?scout_id=8_tg
 
 Если вас интересует иное сотрудничество, пожалуйста, напишите нам на почту: pr@carely.group`;
 
-const operatorText = `Оператор ответит вам в течение 24 часов.
+const operatorText = `❣️ Оператор ответит вам в течение 24 часов.
 
 В зависимости от нагрузки время ответа может быть увеличено.
 
-💜 Благодарим за понимание!`;
+Благодарим за понимание!`;
 
 async function callTelegram(method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
