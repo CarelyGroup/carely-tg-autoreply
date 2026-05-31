@@ -14,7 +14,7 @@ if (!BOT_TOKEN || !WEBHOOK_SECRET || !TELEGRAM_SECRET_TOKEN) {
 }
 
 const redis = REDIS_URL ? new Redis(REDIS_URL) : null;
-const inMemoryRepliedChats = new Set();
+const inMemoryKeys = new Set();
 
 if (!redis) {
   console.warn("REDIS_URL is not set. Reply history will reset after Render restarts.");
@@ -54,7 +54,7 @@ https://bloggers.carely.group/register?scout_id=8_tg
 
 Если вас интересует иное сотрудничество, пожалуйста, напишите нам на почту: pr@carely.group`;
 
-const operatorText = `❣️ Оператор ответит вам в течение 24 часов.
+const operatorText = `💌 Оператор ответит вам в течение 24 часов.
 <i>В зависимости от нагрузки время ответа может быть увеличено.</i>
 
 Пожалуйста, напишите максимально детально ваше предложение или запрос, если это необходимо.
@@ -98,21 +98,21 @@ async function markBusinessMessageRead(msg) {
   }
 }
 
-async function hasAlreadyReplied(key) {
+async function hasKey(key) {
   if (redis) {
     return (await redis.exists(key)) === 1;
   }
 
-  return inMemoryRepliedChats.has(key);
+  return inMemoryKeys.has(key);
 }
 
-async function markAsReplied(key) {
+async function setKey(key) {
   if (redis) {
     await redis.set(key, String(Date.now()));
     return;
   }
 
-  inMemoryRepliedChats.add(key);
+  inMemoryKeys.add(key);
 }
 
 async function sendMainReply(chatId, businessConnectionId) {
@@ -168,36 +168,38 @@ app.get(`/setup-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
 });
 
 app.get(`/admin/clear-replied/${WEBHOOK_SECRET}`, async (req, res) => {
-  const pattern = "cooperation_autoreplied:*";
+  const patterns = ["cooperation_autoreplied:*", "operator_called:*"];
   let deleted = 0;
 
   if (redis) {
-    let cursor = "0";
+    for (const pattern of patterns) {
+      let cursor = "0";
 
-    do {
-      const [nextCursor, keys] = await redis.scan(
-        cursor,
-        "MATCH",
-        pattern,
-        "COUNT",
-        100
-      );
+      do {
+        const [nextCursor, keys] = await redis.scan(
+          cursor,
+          "MATCH",
+          pattern,
+          "COUNT",
+          100
+        );
 
-      cursor = nextCursor;
+        cursor = nextCursor;
 
-      if (keys.length > 0) {
-        deleted += await redis.del(...keys);
-      }
-    } while (cursor !== "0");
+        if (keys.length > 0) {
+          deleted += await redis.del(...keys);
+        }
+      } while (cursor !== "0");
+    }
   } else {
-    deleted = inMemoryRepliedChats.size;
-    inMemoryRepliedChats.clear();
+    deleted = inMemoryKeys.size;
+    inMemoryKeys.clear();
   }
 
   res.json({
     ok: true,
     deleted,
-    pattern
+    patterns
   });
 });
 
@@ -221,7 +223,17 @@ app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
         const businessConnectionId = callback.message?.business_connection_id;
 
         if (chatId && businessConnectionId) {
-          await sendOperatorReply(chatId, businessConnectionId);
+          const operatorKey = `operator_called:${businessConnectionId}:${chatId}`;
+
+          if (await hasKey(operatorKey)) {
+            return;
+          }
+
+          const result = await sendOperatorReply(chatId, businessConnectionId);
+
+          if (result?.ok) {
+            await setKey(operatorKey);
+          }
         }
       }
 
@@ -238,7 +250,19 @@ app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
 
     if (operatorRegex.test(text)) {
       await markBusinessMessageRead(msg);
-      await sendOperatorReply(msg.chat.id, msg.business_connection_id);
+
+      const operatorKey = `operator_called:${msg.business_connection_id}:${msg.chat.id}`;
+
+      if (await hasKey(operatorKey)) {
+        return;
+      }
+
+      const result = await sendOperatorReply(msg.chat.id, msg.business_connection_id);
+
+      if (result?.ok) {
+        await setKey(operatorKey);
+      }
+
       return;
     }
 
@@ -246,7 +270,7 @@ app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
 
     const replyKey = `cooperation_autoreplied:${msg.business_connection_id}:${msg.chat.id}`;
 
-    if (await hasAlreadyReplied(replyKey)) {
+    if (await hasKey(replyKey)) {
       return;
     }
 
@@ -255,7 +279,7 @@ app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
     const result = await sendMainReply(msg.chat.id, msg.business_connection_id);
 
     if (result?.ok) {
-      await markAsReplied(replyKey);
+      await setKey(replyKey);
     }
   } catch (error) {
     console.error("Webhook handler failed:", error);
