@@ -1,4 +1,5 @@
 const express = require("express");
+const Redis = require("ioredis");
 
 const app = express();
 app.use(express.json());
@@ -6,16 +7,30 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 const TELEGRAM_SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
-const COOLDOWN_HOURS = Number(process.env.COOLDOWN_HOURS || 24);
+const REDIS_URL = process.env.REDIS_URL;
 
 if (!BOT_TOKEN || !WEBHOOK_SECRET || !TELEGRAM_SECRET_TOKEN) {
   throw new Error("Missing BOT_TOKEN, WEBHOOK_SECRET or TELEGRAM_SECRET_TOKEN");
 }
 
-const repliedAt = new Map();
+const redis = REDIS_URL ? new Redis(REDIS_URL) : null;
+const inMemoryRepliedChats = new Set();
+
+if (!redis) {
+  console.warn("REDIS_URL is not set. Reply history will reset after Render restarts.");
+}
+
+if (redis) {
+  redis.on("error", (error) => {
+    console.error("Redis error:", error);
+  });
+}
 
 const keywordRegex =
   /сотруднич|партн[её]р|партнерств|партнёрств|коллаб|интеграц|бартер|реклам|блогер|инфлюенс/i;
+
+const operatorRegex =
+  /оператор|менеджер|живой человек|сотрудник|поддержк|позвать оператор/i;
 
 const replyText = `Здравствуйте!
 
@@ -52,13 +67,37 @@ async function callTelegram(method, payload) {
     body: JSON.stringify(payload)
   });
 
-  const data = await response.json().catch(() => null);
+  const text = await response.text();
+  let data;
 
-  if (!response.ok) {
-    console.error(`${method} failed:`, data || (await response.text()));
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = { ok: false, description: text };
+  }
+
+  if (!response.ok || !data.ok) {
+    console.error(`${method} failed:`, data);
   }
 
   return data;
+}
+
+async function hasAlreadyReplied(key) {
+  if (redis) {
+    return (await redis.exists(key)) === 1;
+  }
+
+  return inMemoryRepliedChats.has(key);
+}
+
+async function markAsReplied(key) {
+  if (redis) {
+    await redis.set(key, String(Date.now()));
+    return;
+  }
+
+  inMemoryRepliedChats.add(key);
 }
 
 async function sendMainReply(chatId, businessConnectionId) {
@@ -144,17 +183,26 @@ app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
   if (msg.sender_business_bot || msg.from?.is_bot) return;
 
   const text = msg.text || msg.caption || "";
+  if (!text) return;
+
+  if (operatorRegex.test(text)) {
+    await sendOperatorReply(msg.chat.id, msg.business_connection_id);
+    return;
+  }
+
   if (!keywordRegex.test(text)) return;
 
-  const key = `${msg.business_connection_id}:${msg.chat.id}`;
-  const now = Date.now();
-  const cooldownMs = COOLDOWN_HOURS * 60 * 60 * 1000;
-  const lastReply = repliedAt.get(key);
+  const replyKey = `cooperation_autoreplied:${msg.business_connection_id}:${msg.chat.id}`;
 
-  if (lastReply && now - lastReply < cooldownMs) return;
+  if (await hasAlreadyReplied(replyKey)) {
+    return;
+  }
 
-  repliedAt.set(key, now);
-  await sendMainReply(msg.chat.id, msg.business_connection_id);
+  const result = await sendMainReply(msg.chat.id, msg.business_connection_id);
+
+  if (result?.ok) {
+    await markAsReplied(replyKey);
+  }
 });
 
 const port = process.env.PORT || 3000;
