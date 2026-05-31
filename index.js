@@ -83,6 +83,20 @@ async function callTelegram(method, payload) {
   return data;
 }
 
+async function markBusinessMessageRead(msg) {
+  if (!msg.business_connection_id || !msg.chat?.id || !msg.message_id) return;
+
+  const result = await callTelegram("readBusinessMessage", {
+    business_connection_id: msg.business_connection_id,
+    chat_id: msg.chat.id,
+    message_id: msg.message_id
+  });
+
+  if (!result?.ok) {
+    console.error("Could not mark message as read");
+  }
+}
+
 async function hasAlreadyReplied(key) {
   if (redis) {
     return (await redis.exists(key)) === 1;
@@ -154,54 +168,61 @@ app.get(`/setup-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
 app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
   res.sendStatus(200);
 
-  if (req.get("x-telegram-bot-api-secret-token") !== TELEGRAM_SECRET_TOKEN) {
-    return;
-  }
-
-  const callback = req.body.callback_query;
-
-  if (callback) {
-    await callTelegram("answerCallbackQuery", {
-      callback_query_id: callback.id
-    });
-
-    if (callback.data === "call_operator") {
-      const chatId = callback.message?.chat?.id;
-      const businessConnectionId = callback.message?.business_connection_id;
-
-      if (chatId && businessConnectionId) {
-        await sendOperatorReply(chatId, businessConnectionId);
-      }
+  try {
+    if (req.get("x-telegram-bot-api-secret-token") !== TELEGRAM_SECRET_TOKEN) {
+      return;
     }
 
-    return;
-  }
+    const callback = req.body.callback_query;
 
-  const msg = req.body.business_message;
-  if (!msg) return;
+    if (callback) {
+      await callTelegram("answerCallbackQuery", {
+        callback_query_id: callback.id
+      });
 
-  if (msg.sender_business_bot || msg.from?.is_bot) return;
+      if (callback.data === "call_operator") {
+        const chatId = callback.message?.chat?.id;
+        const businessConnectionId = callback.message?.business_connection_id;
 
-  const text = msg.text || msg.caption || "";
-  if (!text) return;
+        if (chatId && businessConnectionId) {
+          await sendOperatorReply(chatId, businessConnectionId);
+        }
+      }
 
-  if (operatorRegex.test(text)) {
-    await sendOperatorReply(msg.chat.id, msg.business_connection_id);
-    return;
-  }
+      return;
+    }
 
-  if (!keywordRegex.test(text)) return;
+    const msg = req.body.business_message;
+    if (!msg) return;
 
-  const replyKey = `cooperation_autoreplied:${msg.business_connection_id}:${msg.chat.id}`;
+    if (msg.sender_business_bot || msg.from?.is_bot) return;
 
-  if (await hasAlreadyReplied(replyKey)) {
-    return;
-  }
+    const text = msg.text || msg.caption || "";
+    if (!text) return;
 
-  const result = await sendMainReply(msg.chat.id, msg.business_connection_id);
+    if (operatorRegex.test(text)) {
+      await markBusinessMessageRead(msg);
+      await sendOperatorReply(msg.chat.id, msg.business_connection_id);
+      return;
+    }
 
-  if (result?.ok) {
-    await markAsReplied(replyKey);
+    if (!keywordRegex.test(text)) return;
+
+    const replyKey = `cooperation_autoreplied:${msg.business_connection_id}:${msg.chat.id}`;
+
+    if (await hasAlreadyReplied(replyKey)) {
+      return;
+    }
+
+    await markBusinessMessageRead(msg);
+
+    const result = await sendMainReply(msg.chat.id, msg.business_connection_id);
+
+    if (result?.ok) {
+      await markAsReplied(replyKey);
+    }
+  } catch (error) {
+    console.error("Webhook handler failed:", error);
   }
 });
 
