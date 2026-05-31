@@ -145,7 +145,8 @@ async function sendOperatorReply(chatId, businessConnectionId) {
   return callTelegram("sendMessage", {
     chat_id: chatId,
     business_connection_id: businessConnectionId,
-    text: operatorText
+    text: operatorText,
+    parse_mode: "HTML"
   });
 }
 
