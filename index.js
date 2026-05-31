@@ -165,6 +165,40 @@ app.get(`/setup-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
   res.json({ webhookUrl, telegram: data });
 });
 
+app.get(`/admin/clear-replied/${WEBHOOK_SECRET}`, async (req, res) => {
+  const pattern = "cooperation_autoreplied:*";
+  let deleted = 0;
+
+  if (redis) {
+    let cursor = "0";
+
+    do {
+      const [nextCursor, keys] = await redis.scan(
+        cursor,
+        "MATCH",
+        pattern,
+        "COUNT",
+        100
+      );
+
+      cursor = nextCursor;
+
+      if (keys.length > 0) {
+        deleted += await redis.del(...keys);
+      }
+    } while (cursor !== "0");
+  } else {
+    deleted = inMemoryRepliedChats.size;
+    inMemoryRepliedChats.clear();
+  }
+
+  res.json({
+    ok: true,
+    deleted,
+    pattern
+  });
+});
+
 app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
   res.sendStatus(200);
 
