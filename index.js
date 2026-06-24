@@ -8,6 +8,9 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 const TELEGRAM_SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
 const REDIS_URL = process.env.REDIS_URL;
+const QA_APPS_SCRIPT_WEBHOOK_URL =
+  process.env.QA_APPS_SCRIPT_WEBHOOK_URL ||
+  "https://script.google.com/macros/s/AKfycbx3p5SEoDy3FdPVz3ujKyx-UTY32KhgLgTTObFyIyur17i5a-ZBVXfWE-66Gv8S0qzG/exec";
 
 if (!BOT_TOKEN || !WEBHOOK_SECRET || !TELEGRAM_SECRET_TOKEN) {
   throw new Error("Missing BOT_TOKEN, WEBHOOK_SECRET or TELEGRAM_SECRET_TOKEN");
@@ -201,6 +204,38 @@ app.get(`/admin/clear-replied/${WEBHOOK_SECRET}`, async (req, res) => {
     deleted,
     patterns
   });
+});
+
+app.get(`/qa-health/${WEBHOOK_SECRET}`, (req, res) => {
+  res.json({ ok: true, service: "carely-qa-webhook" });
+});
+
+app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    if (req.get("x-telegram-bot-api-secret-token") !== TELEGRAM_SECRET_TOKEN) {
+      console.warn("QA webhook rejected: bad secret token");
+      return;
+    }
+
+    const response = await fetch(QA_APPS_SCRIPT_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "telegram_update", update: req.body }),
+      redirect: "follow"
+    });
+
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("QA Apps Script forward failed:", response.status, text.slice(0, 500));
+      return;
+    }
+
+    console.log("QA update forwarded to Apps Script:", text.slice(0, 500));
+  } catch (error) {
+    console.error("QA webhook handler failed:", error);
+  }
 });
 
 app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
