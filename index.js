@@ -8,6 +8,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 const TELEGRAM_SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
 const REDIS_URL = process.env.REDIS_URL;
+const QA_TELEGRAM_SECRET_TOKEN = process.env.QA_TELEGRAM_SECRET_TOKEN || TELEGRAM_SECRET_TOKEN;
 const QA_APPS_SCRIPT_WEBHOOK_URL =
   process.env.QA_APPS_SCRIPT_WEBHOOK_URL ||
   "https://script.google.com/macros/s/AKfycbx3p5SEoDy3FdPVz3ujKyx-UTY32KhgLgTTObFyIyur17i5a-ZBVXfWE-66Gv8S0qzG/exec";
@@ -214,7 +215,7 @@ app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
   res.sendStatus(200);
 
   try {
-    if (req.get("x-telegram-bot-api-secret-token") !== TELEGRAM_SECRET_TOKEN) {
+    if (req.get("x-telegram-bot-api-secret-token") !== QA_TELEGRAM_SECRET_TOKEN) {
       console.warn("QA webhook rejected: bad secret token");
       return;
     }
