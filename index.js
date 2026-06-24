@@ -176,7 +176,7 @@ async function handleQaCallback(update) {
 }
 
 // Override the first QA callback implementation with a more resilient flow:
-// write the decision to Apps Script first, then update Telegram UI best-effort.
+// acknowledge Telegram first, then write the decision and update UI best-effort.
 function getQaStatusFromCallback(data) {
   const normalized = String(data || "");
   if (normalized === "qa_status|fire") {
@@ -236,11 +236,11 @@ async function handleQaCallback(update) {
     }
   };
 
-  const forwardResult = await forwardQaUpdateToAppsScript(syntheticReactionUpdate);
   const answerResult = await callQaTelegram("answerCallbackQuery", {
     callback_query_id: callback.id,
     text: status.text
   });
+  const forwardResult = await forwardQaUpdateToAppsScript(syntheticReactionUpdate);
   const reactionResult = await setQaMessageReactionBestEffort(chatId, messageId, status.emoji);
 
   console.log(
