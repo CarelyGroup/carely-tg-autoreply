@@ -175,6 +175,88 @@ async function handleQaCallback(update) {
   return true;
 }
 
+// Override the first QA callback implementation with a more resilient flow:
+// write the decision to Apps Script first, then update Telegram UI best-effort.
+function getQaStatusFromCallback(data) {
+  const normalized = String(data || "");
+  if (normalized === "qa_status|fire") {
+    return {
+      emoji: "\uD83D\uDD25",
+      text: "\u041e\u0442\u0432\u0435\u0442 \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u0435\u043d"
+    };
+  }
+  if (normalized === "qa_status|moon") {
+    return {
+      emoji: "\uD83C\uDF1A",
+      text: "\u041d\u0443\u0436\u043d\u0430 \u043f\u0440\u0430\u0432\u043a\u0430"
+    };
+  }
+  return null;
+}
+
+async function setQaMessageReactionBestEffort(chatId, messageId, emoji) {
+  const clearResult = await callQaTelegram("setMessageReaction", {
+    chat_id: chatId,
+    message_id: messageId,
+    reaction: [],
+    is_big: false
+  });
+
+  const setResult = await callQaTelegram("setMessageReaction", {
+    chat_id: chatId,
+    message_id: messageId,
+    reaction: [{ type: "emoji", emoji }],
+    is_big: false
+  });
+
+  return { clearResult, setResult };
+}
+
+async function handleQaCallback(update) {
+  const callback = update.callback_query;
+  const status = getQaStatusFromCallback(callback?.data);
+  if (!callback || !status || !callback.message?.chat?.id || !callback.message?.message_id) {
+    return false;
+  }
+
+  const chatId = callback.message.chat.id;
+  const messageId = callback.message.message_id;
+  const syntheticReactionUpdate = {
+    update_id: update.update_id,
+    message_reaction_count: {
+      chat: callback.message.chat,
+      message_id: messageId,
+      date: Math.floor(Date.now() / 1000),
+      reactions: [
+        {
+          reaction: { type: "emoji", emoji: status.emoji },
+          total_count: 1
+        }
+      ]
+    }
+  };
+
+  const forwardResult = await forwardQaUpdateToAppsScript(syntheticReactionUpdate);
+  const answerResult = await callQaTelegram("answerCallbackQuery", {
+    callback_query_id: callback.id,
+    text: status.text
+  });
+  const reactionResult = await setQaMessageReactionBestEffort(chatId, messageId, status.emoji);
+
+  console.log(
+    "QA callback processed:",
+    JSON.stringify({
+      forwarded: !!forwardResult?.ok,
+      answered: !!answerResult?.ok,
+      reactionCleared: !!reactionResult?.clearResult?.ok,
+      reactionSet: !!reactionResult?.setResult?.ok,
+      messageId
+    })
+  );
+
+  return true;
+}
+
 async function markBusinessMessageRead(msg) {
   if (!msg.business_connection_id || !msg.chat?.id || !msg.message_id) return;
 
