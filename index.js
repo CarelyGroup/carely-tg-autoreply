@@ -8,6 +8,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 const TELEGRAM_SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
 const REDIS_URL = process.env.REDIS_URL;
+const QA_BOT_TOKEN = process.env.QA_BOT_TOKEN || BOT_TOKEN;
 const QA_TELEGRAM_SECRET_TOKEN = process.env.QA_TELEGRAM_SECRET_TOKEN || TELEGRAM_SECRET_TOKEN;
 const QA_APPS_SCRIPT_WEBHOOK_URL =
   process.env.QA_APPS_SCRIPT_WEBHOOK_URL ||
@@ -65,8 +66,8 @@ const operatorText = `💌 Оператор ответит вам в течен�
 
 Благодарим за понимание!`;
 
-async function callTelegram(method, payload) {
-  const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+async function callTelegramWithToken(token, method, payload) {
+  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -86,6 +87,92 @@ async function callTelegram(method, payload) {
   }
 
   return data;
+}
+
+async function callTelegram(method, payload) {
+  return callTelegramWithToken(BOT_TOKEN, method, payload);
+}
+
+async function callQaTelegram(method, payload) {
+  return callTelegramWithToken(QA_BOT_TOKEN, method, payload);
+}
+
+async function forwardQaUpdateToAppsScript(update) {
+  const response = await fetch(QA_APPS_SCRIPT_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "telegram_update", update }),
+    redirect: "follow"
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    console.error("QA Apps Script forward failed:", response.status, text.slice(0, 500));
+    return { ok: false, status: response.status, text };
+  }
+
+  return { ok: true, text };
+}
+
+function getQaStatusFromCallback(data) {
+  const normalized = String(data || "");
+  if (normalized === "qa_status|fire") {
+    return { emoji: "🔥", text: "Отмечено: ответ готов" };
+  }
+  if (normalized === "qa_status|moon") {
+    return { emoji: "🌚", text: "Отмечено: нужна корректировка" };
+  }
+  return null;
+}
+
+async function handleQaCallback(update) {
+  const callback = update.callback_query;
+  const status = getQaStatusFromCallback(callback?.data);
+  if (!callback || !status || !callback.message?.chat?.id || !callback.message?.message_id) {
+    return false;
+  }
+
+  const chatId = callback.message.chat.id;
+  const messageId = callback.message.message_id;
+
+  await callQaTelegram("answerCallbackQuery", {
+    callback_query_id: callback.id,
+    text: status.text
+  });
+
+  const reactionResult = await callQaTelegram("setMessageReaction", {
+    chat_id: chatId,
+    message_id: messageId,
+    reaction: [{ type: "emoji", emoji: status.emoji }],
+    is_big: false
+  });
+
+  const syntheticReactionUpdate = {
+    update_id: update.update_id,
+    message_reaction_count: {
+      chat: callback.message.chat,
+      message_id: messageId,
+      date: Math.floor(Date.now() / 1000),
+      reactions: [
+        {
+          reaction: { type: "emoji", emoji: status.emoji },
+          total_count: 1
+        }
+      ]
+    }
+  };
+
+  const forwardResult = await forwardQaUpdateToAppsScript(syntheticReactionUpdate);
+  if (forwardResult.ok) {
+    console.log(
+      "QA callback status forwarded to Apps Script:",
+      forwardResult.text.slice(0, 500),
+      "reaction:",
+      reactionResult?.ok ? "set" : "not_set"
+    );
+  }
+
+  return true;
 }
 
 async function markBusinessMessageRead(msg) {
@@ -220,20 +307,14 @@ app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
       return;
     }
 
-    const response = await fetch(QA_APPS_SCRIPT_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "telegram_update", update: req.body }),
-      redirect: "follow"
-    });
-
-    const text = await response.text();
-    if (!response.ok) {
-      console.error("QA Apps Script forward failed:", response.status, text.slice(0, 500));
+    if (await handleQaCallback(req.body)) {
       return;
     }
 
-    console.log("QA update forwarded to Apps Script:", text.slice(0, 500));
+    const forwardResult = await forwardQaUpdateToAppsScript(req.body);
+    if (forwardResult.ok) {
+      console.log("QA update forwarded to Apps Script:", forwardResult.text.slice(0, 500));
+    }
   } catch (error) {
     console.error("QA webhook handler failed:", error);
   }
