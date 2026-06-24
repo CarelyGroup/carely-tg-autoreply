@@ -10,6 +10,7 @@ const TELEGRAM_SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
 const REDIS_URL = process.env.REDIS_URL;
 const QA_BOT_TOKEN = process.env.QA_BOT_TOKEN || BOT_TOKEN;
 const QA_TELEGRAM_SECRET_TOKEN = process.env.QA_TELEGRAM_SECRET_TOKEN || TELEGRAM_SECRET_TOKEN;
+const QA_CHANNEL_ID = process.env.QA_CHANNEL_ID || "";
 const QA_APPS_SCRIPT_WEBHOOK_URL =
   process.env.QA_APPS_SCRIPT_WEBHOOK_URL ||
   "https://script.google.com/macros/s/AKfycbx3p5SEoDy3FdPVz3ujKyx-UTY32KhgLgTTObFyIyur17i5a-ZBVXfWE-66Gv8S0qzG/exec";
@@ -179,16 +180,20 @@ async function handleQaCallback(update) {
 // acknowledge Telegram first, then write the decision and update UI best-effort.
 function getQaStatusFromCallback(data) {
   const normalized = String(data || "");
-  if (normalized === "qa_status|fire") {
+  const parts = normalized.split("|");
+  const targetMessageId = parts[2] ? Number(parts[2]) : null;
+  if (parts[0] === "qa_status" && parts[1] === "fire") {
     return {
       emoji: "\uD83D\uDD25",
-      text: "\u041e\u0442\u0432\u0435\u0442 \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u0435\u043d"
+      text: "\u041e\u0442\u0432\u0435\u0442 \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u0435\u043d",
+      targetMessageId
     };
   }
-  if (normalized === "qa_status|moon") {
+  if (parts[0] === "qa_status" && parts[1] === "moon") {
     return {
       emoji: "\uD83C\uDF1A",
-      text: "\u041d\u0443\u0436\u043d\u0430 \u043f\u0440\u0430\u0432\u043a\u0430"
+      text: "\u041d\u0443\u0436\u043d\u0430 \u043f\u0440\u0430\u0432\u043a\u0430",
+      targetMessageId
     };
   }
   return null;
@@ -221,11 +226,13 @@ async function handleQaCallback(update) {
 
   const chatId = callback.message.chat.id;
   const messageId = callback.message.message_id;
+  const targetMessageId = status.targetMessageId || messageId;
+  const targetChatId = status.targetMessageId && QA_CHANNEL_ID ? Number(QA_CHANNEL_ID) : chatId;
   const syntheticReactionUpdate = {
     update_id: update.update_id,
     message_reaction_count: {
       chat: callback.message.chat,
-      message_id: messageId,
+      message_id: targetMessageId,
       date: Math.floor(Date.now() / 1000),
       reactions: [
         {
@@ -241,7 +248,7 @@ async function handleQaCallback(update) {
     text: status.text
   });
   const forwardResult = await forwardQaUpdateToAppsScript(syntheticReactionUpdate);
-  const reactionResult = await setQaMessageReactionBestEffort(chatId, messageId, status.emoji);
+  const reactionResult = await setQaMessageReactionBestEffort(targetChatId, targetMessageId, status.emoji);
 
   console.log(
     "QA callback processed:",
@@ -250,7 +257,8 @@ async function handleQaCallback(update) {
       answered: !!answerResult?.ok,
       reactionCleared: !!reactionResult?.clearResult?.ok,
       reactionSet: !!reactionResult?.setResult?.ok,
-      messageId
+      messageId,
+      targetMessageId
     })
   );
 
