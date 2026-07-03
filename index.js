@@ -265,6 +265,72 @@ async function handleQaCallback(update) {
   return true;
 }
 
+function getQaPrivateCommand(text) {
+  const match = String(text || "").trim().match(/^\/(start|id)(?:@\w+)?(?:\s|$)/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function formatQaUserDisplayName(user) {
+  const fullName = [user?.first_name, user?.last_name].filter(Boolean).join(" ").trim();
+  return fullName || "не указано";
+}
+
+async function handleQaPrivateCommand(update) {
+  const msg = update.message || update.edited_message;
+  if (!msg || msg.chat?.type !== "private") {
+    return false;
+  }
+
+  const command = getQaPrivateCommand(msg.text || msg.caption || "");
+  if (!command) {
+    return false;
+  }
+
+  const from = msg.from || {};
+  const chatId = msg.chat.id;
+  const userId = from.id || "";
+  const username = from.username ? `@${from.username}` : "не указан";
+  const fullName = formatQaUserDisplayName(from);
+
+  const text =
+    command === "start"
+      ? [
+          "Бот подключен.",
+          "",
+          `Ваш chat_id: ${chatId}`,
+          userId ? `Ваш user_id: ${userId}` : "",
+          `Username: ${username}`,
+          `Имя: ${fullName}`,
+          "",
+          "Этот chat_id можно использовать для личных уведомлений."
+        ].filter(Boolean).join("\n")
+      : [
+          `chat_id: ${chatId}`,
+          userId ? `user_id: ${userId}` : "",
+          `username: ${username}`,
+          `name: ${fullName}`
+        ].filter(Boolean).join("\n");
+
+  const result = await callQaTelegram("sendMessage", {
+    chat_id: chatId,
+    text,
+    link_preview_options: { is_disabled: true }
+  });
+
+  console.log(
+    "QA private command processed:",
+    JSON.stringify({
+      command,
+      chatId,
+      userId,
+      username: from.username || "",
+      sent: !!result?.ok
+    })
+  );
+
+  return true;
+}
+
 async function markBusinessMessageRead(msg) {
   if (!msg.business_connection_id || !msg.chat?.id || !msg.message_id) return;
 
@@ -398,6 +464,10 @@ app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
     }
 
     if (await handleQaCallback(req.body)) {
+      return;
+    }
+
+    if (await handleQaPrivateCommand(req.body)) {
       return;
     }
 
