@@ -1,5 +1,6 @@
 const express = require("express");
 const Redis = require("ioredis");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
@@ -21,6 +22,18 @@ if (!BOT_TOKEN || !WEBHOOK_SECRET || !TELEGRAM_SECRET_TOKEN) {
 
 const redis = REDIS_URL ? new Redis(REDIS_URL) : null;
 const inMemoryKeys = new Set();
+const QA_DELIVERY_QUEUE_KEY = "carely:qa:delivery:pending";
+const QA_DELIVERY_JOB_PREFIX = "carely:qa:delivery:job:";
+const QA_DELIVERY_DONE_PREFIX = "carely:qa:delivery:done:";
+const QA_DELIVERY_LOCK_PREFIX = "carely:qa:delivery:lock:";
+const QA_DELIVERY_DONE_TTL_SECONDS = 7 * 24 * 60 * 60;
+const QA_DELIVERY_POLL_MS = 1000;
+const QA_DELIVERY_LOCK_MS = 60 * 1000;
+const QA_DELIVERY_BATCH_SIZE = 5;
+const QA_DELIVERY_RETRY_BASE_MS = 5000;
+const QA_DELIVERY_RETRY_MAX_MS = 5 * 60 * 1000;
+let qaDeliveryWorkerRunning = false;
+let qaDeliveryWorkerTimer = null;
 
 if (!redis) {
   console.warn("REDIS_URL is not set. Reply history will reset after Render restarts.");
@@ -98,9 +111,10 @@ async function callQaTelegram(method, payload) {
   return callTelegramWithToken(QA_BOT_TOKEN, method, payload);
 }
 
-async function forwardQaUpdateToAppsScript(update) {
+async function forwardQaUpdateToAppsScript(update, options = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeoutMs = Number(options.timeoutMs || 15000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(QA_APPS_SCRIPT_WEBHOOK_URL, {
@@ -142,6 +156,169 @@ async function forwardQaUpdateToAppsScript(update) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function qaDeliveryIdentity(update) {
+  if (update?.update_id !== undefined && update?.update_id !== null) {
+    return `update-${String(update.update_id)}`;
+  }
+
+  return `sha256-${crypto
+    .createHash("sha256")
+    .update(JSON.stringify(update || {}))
+    .digest("hex")}`;
+}
+
+function isQaAppsScriptDeliveryAccepted(forwardResult) {
+  return Boolean(
+    forwardResult?.ok === true &&
+      forwardResult?.payload?.ok === true &&
+      forwardResult.payload.deferred !== true
+  );
+}
+
+function qaDeliveryRetryDelay(attempts) {
+  const exponent = Math.max(0, Math.min(Number(attempts || 1) - 1, 10));
+  return Math.min(QA_DELIVERY_RETRY_MAX_MS, QA_DELIVERY_RETRY_BASE_MS * 2 ** exponent);
+}
+
+function qaDeliveryFailureReason(forwardResult) {
+  if (forwardResult?.payload?.deferred === true) {
+    return String(
+      forwardResult.payload.error || forwardResult.payload.reason || "apps_script_deferred"
+    );
+  }
+  return String(
+    forwardResult?.error ||
+      forwardResult?.payload?.error ||
+      forwardResult?.payload?.reason ||
+      (forwardResult?.status ? `http_${forwardResult.status}` : "apps_script_forward_failed")
+  );
+}
+
+async function enqueueQaUpdate(update) {
+  if (!redis) {
+    throw new Error("durable_qa_queue_unavailable");
+  }
+
+  const id = qaDeliveryIdentity(update);
+  const doneKey = QA_DELIVERY_DONE_PREFIX + id;
+  if ((await redis.exists(doneKey)) === 1) {
+    return { id, alreadyDelivered: true };
+  }
+
+  const now = Date.now();
+  const job = {
+    id,
+    update,
+    attempts: 0,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    lastError: ""
+  };
+
+  await redis
+    .multi()
+    .set(QA_DELIVERY_JOB_PREFIX + id, JSON.stringify(job), "NX")
+    .zadd(QA_DELIVERY_QUEUE_KEY, "NX", now, id)
+    .exec();
+
+  return { id, alreadyDelivered: false };
+}
+
+async function releaseQaDeliveryLock(lockKey, token) {
+  if (!redis) return;
+  await redis.eval(
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+    1,
+    lockKey,
+    token
+  );
+}
+
+async function processQaDeliveryJob(id) {
+  if (!redis) return;
+
+  const lockKey = QA_DELIVERY_LOCK_PREFIX + id;
+  const lockToken = `${process.pid}:${Date.now()}:${crypto.randomUUID()}`;
+  const locked = await redis.set(lockKey, lockToken, "NX", "PX", QA_DELIVERY_LOCK_MS);
+  if (!locked) return;
+
+  try {
+    const jobKey = QA_DELIVERY_JOB_PREFIX + id;
+    const rawJob = await redis.get(jobKey);
+    if (!rawJob) {
+      await redis.zrem(QA_DELIVERY_QUEUE_KEY, id);
+      return;
+    }
+
+    let job;
+    try {
+      job = JSON.parse(rawJob);
+    } catch (error) {
+      console.error("QA delivery job is invalid JSON; retaining for inspection:", id, error);
+      await redis.zadd(QA_DELIVERY_QUEUE_KEY, Date.now() + QA_DELIVERY_RETRY_MAX_MS, id);
+      return;
+    }
+
+    const forwardResult = await forwardQaUpdateToAppsScript(job.update);
+    if (isQaAppsScriptDeliveryAccepted(forwardResult)) {
+      await redis
+        .multi()
+        .set(QA_DELIVERY_DONE_PREFIX + id, String(Date.now()), "EX", QA_DELIVERY_DONE_TTL_SECONDS)
+        .del(jobKey)
+        .zrem(QA_DELIVERY_QUEUE_KEY, id)
+        .exec();
+      console.log("QA update delivered from durable queue:", id);
+      return;
+    }
+
+    const attempts = Number(job.attempts || 0) + 1;
+    const delay = qaDeliveryRetryDelay(attempts);
+    job.attempts = attempts;
+    job.updatedAt = new Date().toISOString();
+    job.lastError = qaDeliveryFailureReason(forwardResult);
+
+    await redis
+      .multi()
+      .set(jobKey, JSON.stringify(job))
+      .zadd(QA_DELIVERY_QUEUE_KEY, Date.now() + delay, id)
+      .exec();
+    console.warn("QA update retained for retry:", id, job.lastError, `attempt=${attempts}`);
+  } finally {
+    await releaseQaDeliveryLock(lockKey, lockToken);
+  }
+}
+
+async function drainQaDeliveryQueue() {
+  if (!redis || qaDeliveryWorkerRunning) return;
+  qaDeliveryWorkerRunning = true;
+
+  try {
+    const ids = await redis.zrangebyscore(
+      QA_DELIVERY_QUEUE_KEY,
+      0,
+      Date.now(),
+      "LIMIT",
+      0,
+      QA_DELIVERY_BATCH_SIZE
+    );
+    for (const id of ids) {
+      await processQaDeliveryJob(id);
+    }
+  } catch (error) {
+    console.error("QA durable delivery worker failed:", error);
+  } finally {
+    qaDeliveryWorkerRunning = false;
+  }
+}
+
+function startQaDeliveryWorker() {
+  if (!redis || qaDeliveryWorkerTimer) return;
+  qaDeliveryWorkerTimer = setInterval(() => {
+    void drainQaDeliveryQueue();
+  }, QA_DELIVERY_POLL_MS);
+  void drainQaDeliveryQueue();
 }
 
 function getQaStatusFromCallback(data) {
@@ -479,8 +656,22 @@ app.get(`/admin/clear-replied/${WEBHOOK_SECRET}`, async (req, res) => {
   });
 });
 
-app.get(`/qa-health/${WEBHOOK_SECRET}`, (req, res) => {
-  res.json({ ok: true, service: "carely-qa-webhook" });
+app.get(`/qa-health/${WEBHOOK_SECRET}`, async (req, res) => {
+  let pendingDeliveries = null;
+  if (redis) {
+    try {
+      pendingDeliveries = await redis.zcard(QA_DELIVERY_QUEUE_KEY);
+    } catch (error) {
+      console.error("Could not read QA delivery queue health:", error);
+    }
+  }
+
+  res.json({
+    ok: true,
+    service: "carely-qa-webhook",
+    durableDelivery: Boolean(redis),
+    pendingDeliveries
+  });
 });
 
 app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
@@ -498,13 +689,29 @@ app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    const forwardResult = await forwardQaUpdateToAppsScript(req.body);
-    if (forwardResult.ok) {
-      console.log("QA update forwarded to Apps Script:", forwardResult.text.slice(0, 500));
+    if (redis) {
+      const queued = await enqueueQaUpdate(req.body);
+      console.log(
+        queued.alreadyDelivered ? "QA update already delivered:" : "QA update durably queued:",
+        queued.id
+      );
+      void drainQaDeliveryQueue();
       return res.sendStatus(200);
     }
 
-    return res.status(502).json({ ok: false, error: "apps_script_forward_failed" });
+    // Without durable storage, acknowledge Telegram only after Apps Script
+    // confirms that the update was applied rather than merely deferred.
+    const forwardResult = await forwardQaUpdateToAppsScript(req.body, { timeoutMs: 8000 });
+    if (isQaAppsScriptDeliveryAccepted(forwardResult)) {
+      console.log("QA update synchronously delivered to Apps Script:", forwardResult.text.slice(0, 500));
+      return res.sendStatus(200);
+    }
+
+    return res.status(503).json({
+      ok: false,
+      error: "apps_script_delivery_not_confirmed",
+      reason: qaDeliveryFailureReason(forwardResult)
+    });
   } catch (error) {
     console.error("QA webhook handler failed:", error);
     if (!res.headersSent) {
@@ -598,6 +805,17 @@ app.post(`/webhook/${WEBHOOK_SECRET}`, async (req, res) => {
 
 const port = process.env.PORT || 3000;
 
-app.listen(port, () => {
-  console.log(`Listening on port ${port}`);
-});
+if (require.main === module) {
+  app.listen(port, () => {
+    console.log(`Listening on port ${port}`);
+    startQaDeliveryWorker();
+  });
+}
+
+module.exports = {
+  app,
+  qaDeliveryIdentity,
+  isQaAppsScriptDeliveryAccepted,
+  qaDeliveryRetryDelay,
+  qaDeliveryFailureReason
+};
