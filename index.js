@@ -113,7 +113,9 @@ async function callQaTelegram(method, payload) {
 
 async function forwardQaUpdateToAppsScript(update, options = {}) {
   const controller = new AbortController();
-  const timeoutMs = Number(options.timeoutMs || 15000);
+  // Comment updates can require one read across each active monthly sheet.
+  // Keep the durable queue item until Apps Script has enough time to answer.
+  const timeoutMs = Number(options.timeoutMs || 45000);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -701,7 +703,7 @@ app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
 
     // Without durable storage, acknowledge Telegram only after Apps Script
     // confirms that the update was applied rather than merely deferred.
-    const forwardResult = await forwardQaUpdateToAppsScript(req.body, { timeoutMs: 8000 });
+    const forwardResult = await forwardQaUpdateToAppsScript(req.body, { timeoutMs: 45000 });
     if (isQaAppsScriptDeliveryAccepted(forwardResult)) {
       console.log("QA update synchronously delivered to Apps Script:", forwardResult.text.slice(0, 500));
       return res.sendStatus(200);
