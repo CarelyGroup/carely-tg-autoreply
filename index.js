@@ -676,6 +676,15 @@ app.get(`/qa-health/${WEBHOOK_SECRET}`, async (req, res) => {
   });
 });
 
+app.post(`/qa-drain/${WEBHOOK_SECRET}`, async (req, res) => {
+  if (!redis) {
+    return res.status(503).json({ ok: false, error: "durable_queue_unavailable" });
+  }
+
+  void drainQaDeliveryQueue();
+  return res.status(202).json({ ok: true, started: true });
+});
+
 app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
   try {
     if (req.get("x-telegram-bot-api-secret-token") !== QA_TELEGRAM_SECRET_TOKEN) {
