@@ -698,6 +698,18 @@ app.get(`/qa-queue-debug/${WEBHOOK_SECRET}`, async (req, res) => {
   }
 
   const ids = await redis.zrange(QA_DELIVERY_QUEUE_KEY, 0, 4, "WITHSCORES");
+  const allIds = await redis.zrange(QA_DELIVERY_QUEUE_KEY, 0, -1);
+  const errorCounts = {};
+  for (const allId of allIds) {
+    const raw = await redis.get(QA_DELIVERY_JOB_PREFIX + allId);
+    try {
+      const job = raw ? JSON.parse(raw) : null;
+      const error = job?.lastError || "pending";
+      errorCounts[error] = (errorCounts[error] || 0) + 1;
+    } catch (_) {
+      errorCounts.invalid_json = (errorCounts.invalid_json || 0) + 1;
+    }
+  }
   const sample = [];
   for (let i = 0; i < ids.length; i += 2) {
     const id = ids[i];
@@ -713,7 +725,7 @@ app.get(`/qa-queue-debug/${WEBHOOK_SECRET}`, async (req, res) => {
       updateId: job?.update?.update_id ?? null
     });
   }
-  return res.json({ ok: true, pending: await redis.zcard(QA_DELIVERY_QUEUE_KEY), sample });
+  return res.json({ ok: true, pending: await redis.zcard(QA_DELIVERY_QUEUE_KEY), errorCounts, sample });
 });
 
 app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
