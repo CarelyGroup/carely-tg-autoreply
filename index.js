@@ -692,6 +692,30 @@ app.post(`/qa-drain/${WEBHOOK_SECRET}`, async (req, res) => {
   return res.status(202).json({ ok: true, started: true, rescheduled: ids.length });
 });
 
+app.get(`/qa-queue-debug/${WEBHOOK_SECRET}`, async (req, res) => {
+  if (!redis) {
+    return res.status(503).json({ ok: false, error: "durable_queue_unavailable" });
+  }
+
+  const ids = await redis.zrange(QA_DELIVERY_QUEUE_KEY, 0, 4, "WITHSCORES");
+  const sample = [];
+  for (let i = 0; i < ids.length; i += 2) {
+    const id = ids[i];
+    const rawJob = await redis.get(QA_DELIVERY_JOB_PREFIX + id);
+    let job = null;
+    try { job = rawJob ? JSON.parse(rawJob) : null; } catch (_) { /* inspect below */ }
+    sample.push({
+      id,
+      dueAt: Number(ids[i + 1]),
+      attempts: Number(job?.attempts || 0),
+      lastError: job?.lastError || null,
+      updatedAt: job?.updatedAt || null,
+      updateId: job?.update?.update_id ?? null
+    });
+  }
+  return res.json({ ok: true, pending: await redis.zcard(QA_DELIVERY_QUEUE_KEY), sample });
+});
+
 app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
   try {
     if (req.get("x-telegram-bot-api-secret-token") !== QA_TELEGRAM_SECRET_TOKEN) {
