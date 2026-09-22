@@ -119,13 +119,24 @@ async function forwardQaUpdateToAppsScript(update, options = {}) {
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(QA_APPS_SCRIPT_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "telegram_update", update }),
-      redirect: "follow",
-      signal: controller.signal
-    });
+    const requestBody = JSON.stringify({ type: "telegram_update", update });
+    let targetUrl = QA_APPS_SCRIPT_WEBHOOK_URL;
+    let response;
+    for (let redirectAttempt = 0; redirectAttempt < 3; redirectAttempt++) {
+      response = await fetch(targetUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: requestBody,
+        // Apps Script commonly returns 302. Follow it explicitly so the
+        // redirected request remains POST instead of becoming GET/411.
+        redirect: "manual",
+        signal: controller.signal
+      });
+      if (response.status < 300 || response.status >= 400) break;
+      const location = response.headers.get("location");
+      if (!location) break;
+      targetUrl = new URL(location, targetUrl).toString();
+    }
 
     const text = await response.text();
     if (!response.ok) {
