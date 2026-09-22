@@ -681,8 +681,15 @@ app.post(`/qa-drain/${WEBHOOK_SECRET}`, async (req, res) => {
     return res.status(503).json({ ok: false, error: "durable_queue_unavailable" });
   }
 
+  const ids = await redis.zrange(QA_DELIVERY_QUEUE_KEY, 0, -1);
+  if (ids.length > 0) {
+    const now = Date.now();
+    const scores = [];
+    for (const id of ids) scores.push(now, id);
+    await redis.zadd(QA_DELIVERY_QUEUE_KEY, ...scores);
+  }
   void drainQaDeliveryQueue();
-  return res.status(202).json({ ok: true, started: true });
+  return res.status(202).json({ ok: true, started: true, rescheduled: ids.length });
 });
 
 app.post(`/qa-webhook/${WEBHOOK_SECRET}`, async (req, res) => {
